@@ -12,7 +12,11 @@ st.markdown("Téléversez le PDF de la fiche produit pour extraire les données 
 # --- Clé API ---
 with st.sidebar:
     st.header("Configuration")
-    api_key = st.text_input("Clé API Anthropic", type="password", help="Votre clé API Claude")
+    api_key = st.secrets.get("ANTHROPIC_API_KEY", "") if hasattr(st, "secrets") else ""
+    if not api_key:
+        api_key = st.text_input("Clé API Anthropic", type="password", help="Votre clé API Claude")
+    else:
+        st.success("Clé API chargée automatiquement")
     st.markdown("---")
     st.markdown("**Champs extraits automatiquement :**")
     st.markdown("""
