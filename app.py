@@ -156,6 +156,20 @@ FORMAT DE SORTIE — JSON strict uniquement, sans markdown, sans explication
     raw = re.sub(r"\s*```$", "", raw)
     return json.loads(raw)
 
+def split_paragraphs(html):
+    """Coupe chaque <p> en sous-paragraphes de 2 phrases max (≈ 4 lignes WordPress)."""
+    def split_p(match):
+        content = match.group(1)
+        # Sépare sur . ! ? en gardant la ponctuation, en ignorant les abréviations courantes
+        sentences = re.split(r'(?<=[.!?])\s+(?=[A-ZÀ-Ü\"])', content)
+        chunks = []
+        for i in range(0, len(sentences), 2):
+            chunk = " ".join(sentences[i:i+2]).strip()
+            if chunk:
+                chunks.append(f"<p>{chunk}</p>")
+        return "\n".join(chunks)
+    return re.sub(r'<p>(.*?)</p>', split_p, html, flags=re.DOTALL)
+
 def format_price(val):
     if val is None:
         return "—"
@@ -238,7 +252,7 @@ if uploaded_file and api_key:
         with st.spinner("Génération de la fiche et des éléments SEO..."):
             try:
                 result = generate_fiche_and_seo(data, api_key)
-                fiche_html = result.get("html", "")
+                fiche_html = split_paragraphs(result.get("html", ""))
                 seo = {
                     "expression_cle": result.get("expression_cle", ""),
                     "titre_seo": result.get("titre_seo", ""),
