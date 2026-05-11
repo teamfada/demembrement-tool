@@ -163,7 +163,7 @@ def split_paragraphs(html):
         # Sépare sur . ! ? en gardant la ponctuation, en ignorant les abréviations courantes
         sentences = re.split(r'(?<=[.!?])\s+(?=[A-ZÀ-Ü\"])', content)
         chunks = []
-        for i in range(0, len(sentences), 2):
+        for i in range(0, len(sentences), 4):
             chunk = " ".join(sentences[i:i+2]).strip()
             if chunk:
                 chunks.append(f"<p>{chunk}</p>")
