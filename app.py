@@ -1,22 +1,46 @@
 import streamlit as st
 import fitz  # PyMuPDF
 import anthropic
+import hashlib
 import json
+import os
 import re
+
+import claude_abonnement
 
 st.set_page_config(page_title="Générateur de fiches démembrement", layout="wide")
 
 st.title("Générateur de fiches — Démembrement de propriété")
 st.markdown("Téléversez le PDF de la fiche produit pour extraire les données et générer la publication.")
 
-# --- Clé API ---
+def cle_api_enregistree() -> str:
+    """Clé API des secrets Streamlit ou de l'environnement ; absence de fichier de secrets = pas de clé (pas d'erreur)."""
+    try:
+        cle = st.secrets.get("ANTHROPIC_API_KEY", "")
+    except Exception:
+        cle = ""
+    return cle or os.environ.get("ANTHROPIC_API_KEY", "")
+
+
+# --- Moteur Claude ---
 with st.sidebar:
     st.header("Configuration")
-    api_key = st.secrets.get("ANTHROPIC_API_KEY", "") if hasattr(st, "secrets") else ""
-    if not api_key:
-        api_key = st.text_input("Clé API Anthropic", type="password", help="Votre clé API Claude")
+    moteur = st.radio("Moteur Claude", ["Abonnement Claude (Claude Code)", "API Anthropic (payante)"],
+                      help="L'abonnement passe par Claude Code sur ce PC, sans clé API : usage personnel uniquement.")
+    par_abonnement = moteur.startswith("Abonnement")
+    if par_abonnement:
+        api_key = ""
+        if claude_abonnement.claude_code():
+            st.success("Claude Code trouvé : votre abonnement sera utilisé")
+        else:
+            st.error("Claude Code est introuvable sur ce PC")
     else:
-        st.success("Clé API chargée automatiquement")
+        api_key = cle_api_enregistree()
+        if not api_key:
+            api_key = st.text_input("Clé API Anthropic", type="password", help="Votre clé API Claude")
+        else:
+            st.success("Clé API chargée automatiquement")
+    pret = par_abonnement or bool(api_key)
     st.markdown("---")
     st.markdown("**Champs extraits automatiquement :**")
     st.markdown("""
@@ -42,8 +66,6 @@ def extract_text_from_pdf(pdf_bytes):
     return text
 
 def extract_data_with_claude(text, api_key):
-    client = anthropic.Anthropic(api_key=api_key)
-
     prompt = f"""Tu es un expert en immobilier spécialisé dans le démembrement de propriété.
 
 Voici le texte brut extrait d'une fiche produit PDF d'un programme en démembrement.
@@ -75,6 +97,9 @@ Texte du PDF :
 
 Retourne uniquement le JSON, sans aucun autre texte."""
 
+    if not api_key:
+        return claude_abonnement.demander(prompt, claude_abonnement.SCHEMA_EXTRACTION)
+    client = anthropic.Anthropic(api_key=api_key)
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=2000,
@@ -90,7 +115,6 @@ Retourne uniquement le JSON, sans aucun autre texte."""
 
 def generate_fiche_and_seo(data, api_key):
     """Génère la fiche ET le SEO en un seul appel pour garantir la cohérence."""
-    client = anthropic.Anthropic(api_key=api_key)
 
     decote = str(data.get("decote", ""))
     duree = str(data.get("duree_demembrement", ""))
@@ -145,6 +169,9 @@ FORMAT DE SORTIE — JSON strict uniquement, sans markdown, sans explication
   "html": "<h2>...</h2>\\n<p>...</p>\\n\\n<h2>...</h2>\\n<p>...</p>\\n\\n<h2>...</h2>\\n<p>...</p>"
 }}"""
 
+    if not api_key:
+        return claude_abonnement.demander(prompt, claude_abonnement.SCHEMA_FICHE)
+    client = anthropic.Anthropic(api_key=api_key)
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=2500,
@@ -156,15 +183,18 @@ FORMAT DE SORTIE — JSON strict uniquement, sans markdown, sans explication
     raw = re.sub(r"\s*```$", "", raw)
     return json.loads(raw)
 
+PHRASES_PAR_PARAGRAPHE = 4
+
+
 def split_paragraphs(html):
-    """Coupe chaque <p> en sous-paragraphes de 2 phrases max (≈ 4 lignes WordPress)."""
+    """Coupe chaque <p> en sous-paragraphes de 4 phrases max (≈ 5 lignes WordPress), sans perdre de phrase."""
     def split_p(match):
         content = match.group(1)
         # Sépare sur . ! ? en gardant la ponctuation, en ignorant les abréviations courantes
         sentences = re.split(r'(?<=[.!?])\s+(?=[A-ZÀ-Ü\"])', content)
         chunks = []
-        for i in range(0, len(sentences), 4):
-            chunk = " ".join(sentences[i:i+2]).strip()
+        for i in range(0, len(sentences), PHRASES_PAR_PARAGRAPHE):
+            chunk = " ".join(sentences[i:i + PHRASES_PAR_PARAGRAPHE]).strip()
             if chunk:
                 chunks.append(f"<p>{chunk}</p>")
         return "\n".join(chunks)
@@ -181,7 +211,7 @@ def format_price(val):
 # --- Interface principale ---
 uploaded_file = st.file_uploader("Téléverser la fiche produit PDF", type=["pdf"])
 
-if uploaded_file and api_key:
+if uploaded_file and pret:
     pdf_bytes = uploaded_file.read()
 
     with st.spinner("Extraction du texte PDF..."):
@@ -194,12 +224,17 @@ if uploaded_file and api_key:
     with st.expander("Texte brut extrait (debug)", expanded=False):
         st.text(text[:3000])
 
-    with st.spinner("Analyse des données par Claude..."):
-        try:
-            data = extract_data_with_claude(text, api_key)
-        except Exception as e:
-            st.error(f"Erreur lors de l'extraction : {e}")
-            st.stop()
+    # Streamlit relance la page à chaque saisie : le PDF n'est analysé qu'une fois (résultat gardé par PDF)
+    empreinte = hashlib.sha256(pdf_bytes).hexdigest()
+    if st.session_state.get("pdf_analyse") != empreinte:
+        with st.spinner("Analyse des données par Claude..." + (" (abonnement, 20 à 60 s)" if par_abonnement else "")):
+            try:
+                st.session_state["donnees_pdf"] = extract_data_with_claude(text, api_key)
+                st.session_state["pdf_analyse"] = empreinte
+            except Exception as e:
+                st.error(f"Erreur lors de l'extraction : {e}")
+                st.stop()
+    data = dict(st.session_state["donnees_pdf"])
 
     st.success("Données extraites avec succès !")
 
@@ -249,7 +284,7 @@ if uploaded_file and api_key:
     st.markdown("---")
 
     if st.button("Générer la fiche de publication", type="primary", use_container_width=True):
-        with st.spinner("Génération de la fiche et des éléments SEO..."):
+        with st.spinner("Génération de la fiche et des éléments SEO..." + (" (abonnement, 30 à 90 s)" if par_abonnement else "")):
             try:
                 result = generate_fiche_and_seo(data, api_key)
                 fiche_html = split_paragraphs(result.get("html", ""))
@@ -330,7 +365,7 @@ style="background:#0073aa;color:white;border:none;padding:10px 24px;border-radiu
         with st.expander("Données JSON complètes", expanded=False):
             st.json(data)
 
-elif uploaded_file and not api_key:
+elif uploaded_file and not pret:
     st.warning("Entre ta clé API Anthropic dans la barre latérale pour continuer.")
 elif not uploaded_file:
     st.info("Téléverse un PDF pour commencer.")
